@@ -54,6 +54,11 @@ CSV_FEATURE_COLS_M3 = {
     "day_NIHSS": "NIHSS 24h",
 }
 
+# ----------------------------
+# Bootstrap settings
+# ----------------------------
+BOOTSTRAP_N = 100  # use only the first 100 bootstrap models
+
 
 @st.cache_resource
 def load_model(path: str):
@@ -63,7 +68,7 @@ def load_model(path: str):
 
 
 @st.cache_resource
-def load_boot_models(folder: str):
+def load_boot_models(folder: str, n_models: int):
     if not os.path.isdir(folder):
         raise FileNotFoundError(f"Missing bootstrap folder: {folder}")
 
@@ -71,7 +76,12 @@ def load_boot_models(folder: str):
     if not paths:
         raise FileNotFoundError(f"No bootstrap models found in: {folder}")
 
-    return [joblib.load(p) for p in paths]
+    # take only the first N
+    selected = paths[:n_models]
+    if len(selected) < n_models:
+        st.warning(f"Only found {len(selected)} bootstrap models in '{folder}'. Using all available.")
+
+    return [joblib.load(p) for p in selected]
 
 
 @st.cache_data
@@ -87,6 +97,10 @@ def predict_proba(model, X: pd.DataFrame) -> float:
 
 def row_from_inputs(values: dict, cols: list) -> pd.DataFrame:
     return pd.DataFrame([[values[c] for c in cols]], columns=cols)
+
+
+def fmt_pct(p: float, decimals: int = 0) -> str:
+    return f"{p * 100:.{decimals}f}%"
 
 
 def make_plot(x, y_main, y_med, y_lo, y_hi, xlabel, title):
@@ -164,18 +178,20 @@ if st.button("Predict"):
         progress = st.progress(0, text="Loading models…")
         with st.spinner("Running prediction…"):
             main_model = load_model(MAIN_MODEL_PATH[model_choice])
-            progress.progress(15, text="Loading bootstrap models…")
-            boot_models = load_boot_models(BOOT_DIR[model_choice])
+
+            progress.progress(15, text=f"Loading bootstrap models (first {BOOTSTRAP_N})…")
+            boot_models = load_boot_models(BOOT_DIR[model_choice], BOOTSTRAP_N)
 
             progress.progress(35, text="Predicting with main model…")
             p_main = predict_proba(main_model, X)
 
             preds = []
             n = len(boot_models)
+            progress.progress(40, text=f"Running bootstraps… (0/{n})")
             for i, m in enumerate(boot_models, start=1):
                 preds.append(predict_proba(m, X))
-                if i % 50 == 0 or i == n:
-                    pct = 35 + int(60 * (i / n))
+                if i % 10 == 0 or i == n:
+                    pct = 40 + int(55 * (i / n))
                     progress.progress(min(pct, 95), text=f"Running bootstraps… ({i}/{n})")
 
             p_boot = np.asarray(preds, dtype=float)
@@ -185,10 +201,12 @@ if st.button("Predict"):
 
         progress.progress(100, text="Done.")
         c1, _ = st.columns(2)
-        c1.metric("Main model", f"{p_main:.2f}")
-        st.write(f"**95% Model Uncertainty Interval:** {p_lo:.2f} – {p_hi:.2f}")
-        st.write(f"**Bootstrap Median:** {p_med:.2f}")
-        st.write("Uncertainty obtained with 1000 model bootstraps.")
+
+        # Show as percentages
+        c1.metric("Main model", fmt_pct(p_main, decimals=0))
+        st.write(f"**95% Model Uncertainty Interval:** {fmt_pct(p_lo, 0)} – {fmt_pct(p_hi, 0)}")
+        st.write(f"**Bootstrap Median:** {fmt_pct(p_med, 0)}")
+        st.write(f"Uncertainty obtained with {len(boot_models)} model bootstraps.")
 
     except Exception as e:
         st.error(f"Prediction failed: {e}")
